@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unified Inbox</title>
+<style>
+  :root {
+    --bg:#f6f7f9; --panel:#fff; --ink:#1c1e21; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111317; --panel:#1a1d23; --ink:#e8eaed; --muted:#9aa0a6; --line:#2a2e36; --accent:#6b9bff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; background:var(--bg); color:var(--ink); }
+  .app { display:grid; grid-template-columns:240px 1fr 1.2fr; height:100vh; }
+  aside, .list, .reader { background:var(--panel); overflow:auto; }
+  aside { border-right:1px solid var(--line); padding:16px; }
+  .list { border-right:1px solid var(--line); }
+  h1 { font-size:16px; margin:0 0 16px; }
+  .acct { display:flex; align-items:center; gap:8px; padding:8px; border-radius:8px; cursor:pointer; }
+  .acct:hover, .acct.active { background:var(--bg); }
+  .acct .x { margin-left:auto; color:var(--muted); border:0; background:none; cursor:pointer; visibility:hidden; }
+  .acct:hover .x { visibility:visible; }
+  .dot { width:10px; height:10px; border-radius:50%; flex:none; }
+  .acct span.name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  button.primary { width:100%; margin-top:12px; padding:9px; border:0; border-radius:8px; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; }
+  .toolbar { position:sticky; top:0; background:var(--panel); padding:10px; border-bottom:1px solid var(--line); display:flex; gap:8px; }
+  .toolbar input { flex:1; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); }
+  .toolbar button { padding:8px 12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--ink); cursor:pointer; }
+  .row { padding:10px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .row:hover, .row.sel { background:var(--bg); }
+  .row .top { display:flex; gap:8px; align-items:center; }
+  .row .from { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+  .row.unread .from, .row.unread .subj { font-weight:700; }
+  .row .when { color:var(--muted); font-size:12px; flex:none; }
+  .subj { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .snip { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+  .badge { font-size:11px; padding:1px 7px; border-radius:10px; color:#fff; flex:none; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .reader { padding:20px; }
+  .reader h2 { margin:0 0 6px; font-size:18px; }
+  .meta { color:var(--muted); font-size:13px; margin-bottom:12px; }
+  .actions { display:flex; gap:8px; margin-bottom:14px; }
+  .actions button { padding:6px 12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--ink); cursor:pointer; }
+  iframe { width:100%; min-height:60vh; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  pre.plain { white-space:pre-wrap; font:inherit; }
+  textarea { width:100%; min-height:140px; padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); font:inherit; }
+  .empty { color:var(--muted); padding:40px; text-align:center; }
+  .err { background:#fef2f2; color:#991b1b; padding:8px 12px; margin:10px; border-radius:8px; font-size:13px; }
+  @media (max-width:900px) { .app { grid-template-columns:1fr; height:auto; } aside, .list, .reader { max-height:none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <h1>Unified Inbox</h1>
+    <div class="acct active" data-acct=""><span class="dot" style="background:#6b7280"></span><span class="name">All accounts</span></div>
+    <div id="accts"></div>
+    <button class="primary" onclick="location.href='/oauth/start'">+ Link Gmail account</button>
+  </aside>
+
+  <section class="list">
+    <div class="toolbar">
+      <input id="q" placeholder="Search (Gmail syntax works: from:, is:unread…)">
+      <button id="refresh" title="Refresh">↻</button>
+    </div>
+    <div id="errors"></div>
+    <div id="rows"></div>
+  </section>
+
+  <section class="reader" id="reader"><div class="empty">Select a message</div></section>
+</div>
+
+<script>
+const COLORS = ["#2563eb","#db2777","#059669","#d97706","#7c3aed","#0891b2","#dc2626","#4d7c0f"];
+let accounts = [], current = "", messages = [];
+const colorOf = (a) => COLORS[Math.max(0, accounts.indexOf(a)) % COLORS.length];
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const $ = (id) => document.getElementById(id);
+
+function fmtDate(ms) {
+  const d = new Date(ms), now = new Date();
+  return d.toDateString() === now.toDateString()
+    ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : d.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+async function loadAccounts() {
+  accounts = await (await fetch("/api/accounts")).json();
+  $("accts").innerHTML = accounts.map((a) => `
+    <div class="acct ${current === a ? "active" : ""}" data-acct="${esc(a)}">
+      <span class="dot" style="background:${colorOf(a)}"></span>
+      <span class="name">${esc(a)}</span>
+      <button class="x" data-remove="${esc(a)}" title="Unlink">✕</button>
+    </div>`).join("");
+  document.querySelector('[data-acct=""]').classList.toggle("active", current === "");
+}
+
+async function loadInbox() {
+  $("rows").innerHTML = '<div class="empty">Loading…</div>';
+  const p = new URLSearchParams({ limit: 25 });
+  if (current) p.set("account", current);
+  if ($("q").value.trim()) p.set("q", $("q").value.trim());
+  const { messages: m, errors } = await (await fetch("/api/inbox?" + p)).json();
+  messages = m;
+  $("errors").innerHTML = errors.map((e) => `<div class="err">${esc(e.account)}: ${esc(e.error)}</div>`).join("");
+  $("rows").innerHTML = m.length
+    ? m.map((x, i) => `
+      <div class="row ${x.unread ? "unread" : ""}" data-i="${i}">
+        <div class="top">
+          <span class="badge" style="background:${colorOf(x.account)}">${esc(x.account.split("@")[0])}</span>
+          <span class="from">${esc(x.from.replace(/<.*>/, "").trim() || x.from)}</span>
+          <span class="when">${fmtDate(x.date)}</span>
+        </div>
+        <div class="subj">${esc(x.subject)}</div>
+        <div class="snip">${esc(x.snippet)}</div>
+      </div>`).join("")
+    : accounts.length
+      ? '<div class="empty">No messages</div>'
+      : '<div class="empty">Link a Gmail account to get started</div>';
+}
+
+async function openMessage(i) {
+  const m = messages[i];
+  document.querySelectorAll(".row").forEach((r) => r.classList.toggle("sel", r.dataset.i == i));
+  $("reader").innerHTML = '<div class="empty">Loading…</div>';
+  const d = await (await fetch(`/api/message/${encodeURIComponent(m.account)}/${m.id}`)).json();
+  if (d.error) { $("reader").innerHTML = `<div class="err">${esc(d.error)}</div>`; return; }
+  m.unread = false;
+  document.querySelector(`.row[data-i="${i}"]`)?.classList.remove("unread");
+  $("reader").innerHTML = `
+    <h2>${esc(d.subject || "(no subject)")}</h2>
+    <div class="meta">
+      From ${esc(d.from)}<br>To ${esc(d.to)} · ${esc(d.date)}<br>
+      Received in <span class="badge" style="background:${colorOf(m.account)}">${esc(m.account)}</span>
+    </div>
+    <div class="actions">
+      <button id="replyBtn">Reply</button>
+      <button id="archiveBtn">Archive</button>
+    </div>
+    <div id="body"></div>
+    <div id="compose"></div>`;
+  const body = $("body");
+  if (d.html) {
+    const f = document.createElement("iframe");
+    f.setAttribute("sandbox", ""); // no scripts, no same-origin access
+    f.srcdoc = d.html;
+    body.appendChild(f);
+  } else {
+    body.innerHTML = `<pre class="plain">${esc(d.text || "(empty)")}</pre>`;
+  }
+  $("archiveBtn").onclick = async () => {
+    await fetch(`/api/message/${encodeURIComponent(m.account)}/${m.id}/archive`, { method: "POST" });
+    await loadInbox();
+    $("reader").innerHTML = '<div class="empty">Archived</div>';
+  };
+  $("replyBtn").onclick = () => {
+    const replyTo = (d.from.match(/<(.+)>/) || [, d.from])[1];
+    $("compose").innerHTML = `
+      <p class="meta">Replying from <b>${esc(m.account)}</b> to ${esc(replyTo)}</p>
+      <textarea id="replyText" placeholder="Write your reply…"></textarea>
+      <div class="actions" style="margin-top:8px"><button id="sendBtn">Send</button></div>`;
+    $("sendBtn").onclick = async () => {
+      const r = await fetch("/api/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account: m.account, to: replyTo,
+          subject: /^re:/i.test(d.subject) ? d.subject : "Re: " + d.subject,
+          body: $("replyText").value, threadId: d.threadId, inReplyTo: d.messageId,
+        }),
+      });
+      $("compose").innerHTML = r.ok ? '<p class="meta">Sent ✓</p>' : '<div class="err">Send failed</div>';
+    };
+  };
+}
+
+// events
+$("rows").addEventListener("click", (e) => { const r = e.target.closest(".row"); if (r) openMessage(+r.dataset.i); });
+$("refresh").onclick = loadInbox;
+$("q").addEventListener("keydown", (e) => { if (e.key === "Enter") loadInbox(); });
+document.querySelector("aside").addEventListener("click", async (e) => {
+  const rm = e.target.closest("[data-remove]");
+  if (rm) {
+    if (confirm(`Unlink ${rm.dataset.remove}?`)) {
+      await fetch("/api/accounts/" + encodeURIComponent(rm.dataset.remove), { method: "DELETE" });
+      if (current === rm.dataset.remove) current = "";
+      await loadAccounts(); await loadInbox();
+    }
+    return;
+  }
+  const a = e.target.closest(".acct");
+  if (a) { current = a.dataset.acct; await loadAccounts(); await loadInbox(); }
+});
+
+(async () => { await loadAccounts(); await loadInbox(); })();
+</script>
+</body>
+</html>

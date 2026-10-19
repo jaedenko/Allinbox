@@ -1,0 +1,13 @@
+{
+  "name": "unified-inbox",
+  "version": "1.0.0",
+  "description": "Link multiple Gmail accounts and read them as one inbox",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "googleapis": "^144.0.0"
+  }
+}
